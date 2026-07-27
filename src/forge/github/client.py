@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, Sequence
 
 from forge.errors import ForgeError
-from forge.github.auth import AnonymousCredentials, Credentials
+from forge.github.auth import REDACTED, AnonymousCredentials, Credentials
 from forge.github.models import RateLimit
 
 #: The public GitHub API root.
@@ -46,6 +46,31 @@ READ_ONLY_METHODS: frozenset[str] = frozenset({"GET", "HEAD"})
 
 #: Safety net for pagination so a malformed Link header cannot loop forever.
 DEFAULT_MAX_PAGES = 100
+
+#: Headers whose values must never be rendered. Compared case-insensitively,
+#: because HTTP header names are not case sensitive.
+SENSITIVE_HEADERS: frozenset[str] = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+    }
+)
+
+
+def redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Return a copy of ``headers`` with every sensitive value replaced.
+
+    Header *names* are preserved so a reader can still see that, say, an
+    Authorization header was present; only the value is removed. The input is
+    never mutated.
+    """
+    return {
+        key: (REDACTED if key.lower() in SENSITIVE_HEADERS else value)
+        for key, value in headers.items()
+    }
 
 
 class GitHubError(ForgeError):
@@ -101,12 +126,34 @@ class RateLimitError(GitHubApiError):
 
 @dataclass(frozen=True)
 class HttpRequest:
-    """An outgoing HTTP request, fully resolved."""
+    """An outgoing HTTP request, fully resolved.
+
+    This object necessarily carries the resolved ``Authorization`` header, so
+    its representation is redacted in two independent ways: ``headers`` is
+    excluded from the dataclass-generated ``repr``, and the explicit
+    ``__repr__`` below renders sensitive values as a redaction. Either alone
+    would be sufficient; both together mean that removing one does not silently
+    reintroduce a credential leak into logs, tracebacks or debugger output.
+
+    Redaction is a display concern only. :attr:`headers` still holds the real
+    values, because the transport has to send them.
+    """
 
     method: str
     url: str
-    headers: Mapping[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+
+    def redacted_headers(self) -> dict[str, str]:
+        """The headers with sensitive values removed, safe to log."""
+        return redact_headers(self.headers)
+
+    def __repr__(self) -> str:
+        return (
+            f"HttpRequest(method={self.method!r}, url={self.url!r}, "
+            f"headers={self.redacted_headers()!r}, "
+            f"timeout_seconds={self.timeout_seconds!r})"
+        )
 
 
 @dataclass(frozen=True)

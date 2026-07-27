@@ -94,6 +94,7 @@ __all__ = [
     "ReadOnlyViolationError",
     "RepositoriesAPI",
     "Repository",
+    "TokenCredentials",
     "Transport",
     "TransportError",
     "UrllibTransport",

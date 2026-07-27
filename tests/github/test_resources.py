@@ -7,6 +7,7 @@ from typing import Any, Callable
 import pytest
 
 from forge.github import GitHub
+from forge.github.auth import TokenCredentials
 from forge.github.branches import BranchesAPI
 from forge.github.client import GitHubClient, NotFoundError
 from forge.github.commits import CommitsAPI
@@ -315,3 +316,54 @@ def test_two_facades_are_independent(transport) -> None:
 
     assert first.client is not second.client
     assert first.repositories is not second.repositories
+
+
+# ---------------------------------------------------------------------------
+# public API surface
+# ---------------------------------------------------------------------------
+
+
+def test_token_credentials_is_exported() -> None:
+    """TokenCredentials is part of the documented public API.
+
+    It is the type callers need in order to authenticate at all, and the README
+    example imports it by name, so omitting it from __all__ would break
+    ``from forge.github import *`` and misrepresent the public surface.
+    """
+    import forge.github as package
+
+    assert "TokenCredentials" in package.__all__
+    assert package.TokenCredentials is TokenCredentials
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["TokenCredentials", "AnonymousCredentials", "Credentials", "credentials_from_env"],
+)
+def test_credential_api_is_fully_exported(name: str) -> None:
+    """Every piece needed to construct credentials is exported together."""
+    import forge.github as package
+
+    assert name in package.__all__
+
+
+def test_every_exported_name_resolves() -> None:
+    """__all__ must not name anything the package does not actually provide.
+
+    Guards against the whole class of defect this test was added for: a name
+    listed but missing, or a public type present but never listed.
+    """
+    import forge.github as package
+
+    missing = [name for name in package.__all__ if not hasattr(package, name)]
+
+    assert missing == [], f"__all__ names these non-existent attributes: {missing}"
+
+
+def test_star_import_provides_the_credential_types() -> None:
+    """A wildcard import yields a usable client-construction surface."""
+    namespace: dict[str, object] = {}
+    exec("from forge.github import *", namespace)  # noqa: S102
+
+    for name in ("GitHub", "GitHubClient", "TokenCredentials", "AnonymousCredentials"):
+        assert name in namespace, f"{name} was not provided by a star import"

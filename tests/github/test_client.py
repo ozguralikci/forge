@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Callable
 
 import pytest
 
-from forge.github.auth import AnonymousCredentials, TokenCredentials
+from forge.github.auth import REDACTED, AnonymousCredentials, TokenCredentials
 from forge.github.client import (
     READ_ONLY_METHODS,
+    SENSITIVE_HEADERS,
     AuthenticationError,
     GitHubApiError,
     GitHubClient,
     GitHubError,
+    HttpRequest,
     HttpResponse,
     NotFoundError,
     RateLimitError,
@@ -20,6 +23,7 @@ from forge.github.client import (
     TransportError,
     UrllibTransport,
     parse_link_header,
+    redact_headers,
 )
 
 SECRET = "ghp_ThisIsNotARealTokenJustATestValue"
@@ -425,6 +429,132 @@ def test_pagination_rejects_non_array_payloads(
 
     with pytest.raises(GitHubApiError, match="Expected a JSON array"):
         client.paginate_items("/items")
+
+
+# ---------------------------------------------------------------------------
+# request representation must not leak credentials
+# ---------------------------------------------------------------------------
+
+
+def test_http_request_repr_redacts_authorization() -> None:
+    """The token must not appear in the request's repr."""
+    request = HttpRequest(
+        method="GET",
+        url="https://api.github.com/repos/o/r",
+        headers={"Authorization": f"Bearer {SECRET}"},
+    )
+
+    rendered = repr(request)
+
+    assert SECRET not in rendered
+    assert REDACTED in rendered
+    # The header's presence is still visible; only its value is removed.
+    assert "Authorization" in rendered
+
+
+def test_http_request_str_redacts_authorization() -> None:
+    """str() falls through to the redacting repr."""
+    request = HttpRequest(
+        method="GET", url="https://api.github.com", headers={"Authorization": SECRET}
+    )
+
+    assert SECRET not in str(request)
+    assert SECRET not in f"{request}"
+    assert SECRET not in "{}".format(request)
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "X-API-Key"],
+)
+def test_all_sensitive_headers_are_redacted(header: str) -> None:
+    """Every header named in SENSITIVE_HEADERS is redacted."""
+    request = HttpRequest(method="GET", url="u", headers={header: SECRET})
+
+    assert SECRET not in repr(request)
+
+
+@pytest.mark.parametrize(
+    "header", ["authorization", "AUTHORIZATION", "AuThOrIzAtIoN"]
+)
+def test_sensitive_header_matching_is_case_insensitive(header: str) -> None:
+    """HTTP header names are case-insensitive, so redaction must be too."""
+    request = HttpRequest(method="GET", url="u", headers={header: SECRET})
+
+    assert SECRET not in repr(request)
+
+
+def test_non_sensitive_headers_remain_visible() -> None:
+    """Redaction is targeted: ordinary headers stay debuggable."""
+    request = HttpRequest(
+        method="GET",
+        url="u",
+        headers={"Accept": "application/vnd.github+json", "Authorization": SECRET},
+    )
+
+    rendered = repr(request)
+
+    assert "application/vnd.github+json" in rendered
+    assert SECRET not in rendered
+
+
+def test_headers_excluded_from_generated_dataclass_repr() -> None:
+    """The second, independent guard: the field itself opts out of repr.
+
+    If the explicit __repr__ were ever removed, the generated one must still not
+    render header values.
+    """
+    fields = {f.name: f for f in dataclasses.fields(HttpRequest)}
+
+    assert fields["headers"].repr is False
+
+
+def test_redaction_does_not_alter_the_headers_that_get_sent() -> None:
+    """Redaction is display-only; the real value must still be transmitted."""
+    request = HttpRequest(
+        method="GET", url="u", headers={"Authorization": f"Bearer {SECRET}"}
+    )
+
+    assert request.headers["Authorization"] == f"Bearer {SECRET}"
+    assert request.redacted_headers()["Authorization"] == REDACTED
+
+
+def test_redact_headers_does_not_mutate_its_input() -> None:
+    """The helper returns a copy rather than editing the caller's mapping."""
+    original = {"Authorization": SECRET, "Accept": "application/json"}
+
+    redacted = redact_headers(original)
+
+    assert original["Authorization"] == SECRET
+    assert redacted["Authorization"] == REDACTED
+    assert redacted["Accept"] == "application/json"
+
+
+def test_real_request_built_by_client_does_not_leak_the_token(
+    transport, make_response
+) -> None:
+    """End to end: a request the client actually built is safe to log."""
+    client = GitHubClient(
+        credentials=TokenCredentials(token=SECRET), transport=transport
+    )
+    transport.responses.append(make_response({}))
+
+    client.get("/repos/o/r")
+    sent = transport.last_request
+
+    # The header really was sent...
+    assert sent.headers["Authorization"] == f"Bearer {SECRET}"
+    # ...but no rendering of the request discloses it.
+    assert SECRET not in repr(sent)
+    assert SECRET not in str(sent)
+
+
+def test_sensitive_header_set_covers_authorization() -> None:
+    """A regression guard on the constant itself."""
+    assert "authorization" in SENSITIVE_HEADERS
+    assert all(name == name.lower() for name in SENSITIVE_HEADERS), (
+        "entries must be lowercase for case-insensitive matching to work"
+    )
 
 
 # ---------------------------------------------------------------------------

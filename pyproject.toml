@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "forge"
-version = "0.1.0"
-description = "FORGE v0.1 - deterministic task execution core for the AI Software Factory"
+version = "0.1.1"
+description = "FORGE - deterministic task execution core for the AI Software Factory"
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",

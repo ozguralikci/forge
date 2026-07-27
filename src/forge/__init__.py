@@ -15,7 +15,7 @@ from forge.errors import (
 )
 from forge.states import TRANSITIONS, State, StateMachine
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "ForgeError",

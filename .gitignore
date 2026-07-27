@@ -9,3 +9,5 @@ build/
 workspace/
 logs/*.log
 secrets/
+runs/
+*.egg-info/

@@ -1,0 +1,57 @@
+# A harmless example task for FORGE v0.1.
+#
+# The FakeProvider writes result.txt into the run workspace. On its first
+# attempt it writes a deliberately broken value, so validation fails and the
+# runner enters FIX_REQUIRED. On its second attempt it writes the correct
+# value and validation passes.
+#
+# Nothing here is simulated. The validation command below is a real process and
+# the PASS verdict comes from its real exit code.
+
+task_id: HELLO-001
+project_id: FORGE-PILOT
+title: Produce a valid result artifact
+description: >-
+  Exercise the FORGE v0.1 loop end to end using the deterministic FakeProvider.
+  The provider must leave a result.txt file containing OK in the run workspace.
+acceptance_criteria:
+  - A file named result.txt exists in the workspace.
+  - The contents of result.txt are exactly "OK".
+risk_level: low
+
+# Declared for the task schema. NOTE: path restrictions are not enforced in
+# v0.1 - there is no sandbox yet. See "Not implemented yet" in the README.
+writable_paths:
+  - result.txt
+read_only_paths: []
+required_secrets: []
+
+provider:
+  name: fake
+  mode: fail_then_succeed
+  artifact: result.txt
+
+validation:
+  # Each command is an argv list, executed without a shell. "${PYTHON}" expands
+  # to the interpreter running FORGE, so the example does not depend on how
+  # "python" happens to resolve on PATH.
+  commands:
+    - - "${PYTHON}"
+      - "-c"
+      - |
+        import pathlib, sys
+
+        artifact = pathlib.Path("result.txt")
+        if not artifact.is_file():
+            sys.exit("FAIL: result.txt was not created")
+
+        value = artifact.read_text(encoding="utf-8").strip()
+        if value != "OK":
+            sys.exit(f"FAIL: result.txt contains {value!r}, expected 'OK'")
+
+        print("PASS: result.txt contains OK")
+
+execution:
+  max_fix_rounds: 3
+  command_timeout_seconds: 30
+  task_timeout_seconds: 120

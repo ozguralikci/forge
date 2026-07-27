@@ -177,6 +177,90 @@ by packaging the schema as package data when the schema set stabilises.
 
 ---
 
+# GitHub integration (v0.1.1) - read-only foundation
+
+`forge.github` establishes the architecture for GitHub access. It is a
+**foundation, not a feature**: it reads, and it cannot write.
+
+This layer is entirely additive. No execution-engine, runtime, or state-machine
+module imports it, and a test (`tests/github/test_isolation.py`) enforces that
+separation so the two halves cannot quietly become coupled.
+
+## Read-only is structural, not a convention
+
+`GitHubClient.request()` refuses any method outside `GET` and `HEAD` **before a
+request is constructed**, raising `ReadOnlyViolationError`:
+
+```python
+client.request("POST", "/repos/o/r/pulls")   # ReadOnlyViolationError
+```
+
+A mutation is therefore a loud programming error rather than something prevented
+by everyone remembering not to do it. Adding write support will mean
+deliberately widening `READ_ONLY_METHODS` - a visible, reviewable change rather
+than a silent capability drift. The resource APIs also expose no `create`,
+`merge`, `update`, or `delete` methods at all.
+
+## Layout
+
+| Module | Responsibility |
+|---|---|
+| `models.py` | Frozen dataclasses: `Repository`, `Branch`, `PullRequest`, `Commit`, `GitHubUser`, `RateLimit` |
+| `auth.py` | `Credentials` protocol, `TokenCredentials`, `AnonymousCredentials`, env resolution |
+| `client.py` | `Transport` protocol, `UrllibTransport`, `GitHubClient`, error hierarchy, pagination |
+| `repositories.py` `branches.py` `pull_requests.py` `commits.py` | Read-only resource queries |
+| `__init__.py` | The `GitHub` facade (composition root) and public exports |
+
+## Usage
+
+```python
+from forge.github import GitHub, TokenCredentials, credentials_from_env
+
+github = GitHub.from_credentials(credentials_from_env())
+repository = github.repositories.get("ozguralikci", "forge")
+open_prs = github.pull_requests.list("ozguralikci", "forge", state="open")
+commits = github.commits.list("ozguralikci", "forge", sha="main")
+```
+
+Without a token the client works anonymously against public data, at GitHub's
+lower unauthenticated rate limit. Tokens are read from `FORGE_GITHUB_TOKEN`,
+then `GITHUB_TOKEN`.
+
+## Dependency injection and testability
+
+Every collaborator is passed in and there is no module-level state, so any
+number of independently configured clients can coexist. Swapping the transport
+is all it takes to test without a network:
+
+```python
+client = GitHubClient(credentials=TokenCredentials(token), transport=FakeTransport())
+github = GitHub(client)
+```
+
+All 125 tests in `tests/github/` run against a fake transport. None opens a
+socket and none reads the real environment.
+
+## Token handling
+
+Tokens are excluded from the generated `repr`, and `__repr__` / `__str__` are
+overridden to emit `***redacted***`. `TokenCredentials.redacted()` returns a
+fingerprint that discloses only the token's length. Tests assert that the secret
+appears in no rendering of the object and in no error message.
+
+## Deliberately not implemented
+
+- **Any write operation.** No branch creation, no commits, no PR create, update,
+  merge, or comment. Read-only architecture comes first.
+- GitHub App / installation authentication - only token and anonymous.
+- Webhooks, GraphQL, checks, and Actions APIs.
+- Caching, ETag revalidation, and automatic rate-limit backoff. `RateLimit` is
+  parsed and surfaced, and exhaustion raises `RateLimitError`, but nothing
+  retries or sleeps on the caller's behalf.
+- Any wiring into the execution engine. Nothing in the task runner consults
+  GitHub yet.
+
+---
+
 ## İlk hedef
 
 İlk pilotta sistem şu akışı kanıtlayacaktır:

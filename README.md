@@ -128,7 +128,12 @@ available. Validation stops at the first failing command.
 
 - `max_fix_rounds` - caps retries, then moves to `BLOCKED`
 - `command_timeout_seconds` - per command, enforced by the subprocess timeout
-- `task_timeout_seconds` - overall wall clock for the run
+- `task_timeout_seconds` - the budget shared by all validation commands in a
+  run. It is re-read before every command, so a command is never granted more
+  than `min(command_timeout_seconds, remaining task time)` and the cumulative
+  validation time cannot exceed the budget. If the budget is gone before a
+  command starts, that command is not launched and is recorded as timed out.
+  See the limitation below for what this does **not** cover.
 - Illegal state transitions raise instead of being silently ignored
 - A task declaring `required_secrets` is **refused**, because v0.1 has no secret
   broker and will not pretend to honour a guarantee it cannot keep
@@ -147,6 +152,19 @@ None of the following exist in v0.1, by design:
 - Git checkpointing and rollback
 - Crash resume. `state.json` is written after every transition and contains
   enough to resume, but no resume command exists yet.
+
+### Known limitation: `task_timeout_seconds` is not a hard wall-clock limit
+
+`task_timeout_seconds` bounds **validation subprocesses**, and is checked
+between attempts. It is **not** a hard wall-clock limit around provider
+execution.
+
+The provider runs inside the FORGE process as an ordinary call to
+`implement()`. A provider that blocks forever cannot be forcibly interrupted;
+the deadline is only observed once control returns. With the built-in
+`FakeProvider` this is not reachable, but it becomes real as soon as providers
+do meaningful work. Enforcing it properly requires running providers in a
+separate process or thread with a kill path, which is deferred to a later phase.
 
 ### Known limitation: schema discovery
 

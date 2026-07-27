@@ -27,6 +27,12 @@ _SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
 #: Sentinel exit code recorded when a command could not be started at all.
 LAUNCH_FAILURE_EXIT_CODE = -1
 
+#: Recorded when the task budget ran out before a command could be launched.
+TASK_BUDGET_EXHAUSTED_MESSAGE = (
+    "Task time budget exhausted before this command started; "
+    "the command was not launched."
+)
+
 
 def _slugify(command: Sequence[str]) -> str:
     """Build a short filesystem-safe label from a command's executable name."""
@@ -117,12 +123,19 @@ class ValidationEngine:
         commands: Sequence[Sequence[str]],
         round_index: int,
         cwd: Optional[Path] = None,
-        remaining_seconds: Optional[float] = None,
+        task_time_remaining: Optional[Callable[[], float]] = None,
     ) -> ValidationResult:
         """Run every command in order, stopping at the first failure.
 
         Stopping early keeps the evidence readable: once a command fails, the
         output of later commands describes a workspace that is already broken.
+
+        ``task_time_remaining`` is a callback returning the seconds left in the
+        overall task budget. It is deliberately a callback rather than a number:
+        it is re-evaluated immediately before every command, so the budget is
+        shared across the whole round. Passing a single precomputed number would
+        let each of N commands consume the full remaining budget, allowing a
+        round to overrun the task deadline by a factor of N.
         """
         workdir = Path(cwd) if cwd is not None else self._paths.workspace_dir
         workdir.mkdir(parents=True, exist_ok=True)
@@ -130,8 +143,23 @@ class ValidationEngine:
         collected: list[CommandEvidence] = []
         for index, command in enumerate(commands):
             timeout = float(self._command_timeout)
-            if remaining_seconds is not None:
-                timeout = max(0.1, min(timeout, remaining_seconds))
+
+            if task_time_remaining is not None:
+                remaining = task_time_remaining()
+                if remaining <= 0:
+                    # The budget is gone. Record deterministic timeout evidence
+                    # and stop without launching this command at all.
+                    evidence = self._budget_exhausted_evidence(
+                        command=tuple(command),
+                        round_index=round_index,
+                        index=index,
+                    )
+                    collected.append(evidence)
+                    if self._on_command is not None:
+                        self._on_command(evidence)
+                    break
+                # Never grant more than the smaller of the two limits.
+                timeout = min(timeout, remaining)
 
             evidence = self._run_one(
                 command=tuple(command),
@@ -152,6 +180,62 @@ class ValidationEngine:
             passed=bool(collected) and all(item.passed for item in collected),
         )
 
+    def _evidence_files(
+        self, command: tuple[str, ...], round_index: int, index: int
+    ) -> tuple[Path, Path, Path]:
+        """Return the stdout, stderr and record paths for one command."""
+        prefix = f"round-{round_index:02d}-cmd-{index:02d}-{_slugify(command)}"
+        return (
+            self._paths.evidence_dir / f"{prefix}.stdout.txt",
+            self._paths.evidence_dir / f"{prefix}.stderr.txt",
+            self._paths.evidence_dir / f"{prefix}.json",
+        )
+
+    def _budget_exhausted_evidence(
+        self, command: tuple[str, ...], round_index: int, index: int
+    ) -> CommandEvidence:
+        """Record a command that was never launched because time ran out.
+
+        The evidence is shaped exactly like a real timeout so downstream code
+        needs no special case: ``timed_out`` is true and ``exit_code`` is None,
+        so the command - and therefore the round - counts as failed.
+        """
+        stdout_file, stderr_file, record_file = self._evidence_files(
+            command, round_index, index
+        )
+        timestamp = utc_now_iso()
+        launch_error = TASK_BUDGET_EXHAUSTED_MESSAGE
+
+        stdout_file.write_text("", encoding="utf-8")
+        stderr_file.write_text(launch_error, encoding="utf-8")
+
+        evidence = CommandEvidence(
+            run_id=self._run_id,
+            round_index=round_index,
+            index=index,
+            command=command,
+            exit_code=None,
+            timed_out=True,
+            started_at=timestamp,
+            ended_at=timestamp,
+            duration_seconds=0.0,
+            stdout_path=str(stdout_file.relative_to(self._paths.root)),
+            stderr_path=str(stderr_file.relative_to(self._paths.root)),
+            stdout_bytes=0,
+            stderr_bytes=len(launch_error.encode("utf-8")),
+            launch_error=launch_error,
+        )
+        self._persist(evidence, record_file)
+        return evidence
+
+    def _persist(self, evidence: CommandEvidence, record_file: Path) -> None:
+        """Write the JSON evidence record for one command."""
+        record_file.write_text(
+            json.dumps(evidence.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
     def _run_one(
         self,
         command: tuple[str, ...],
@@ -160,10 +244,9 @@ class ValidationEngine:
         workdir: Path,
         timeout: float,
     ) -> CommandEvidence:
-        prefix = f"round-{round_index:02d}-cmd-{index:02d}-{_slugify(command)}"
-        stdout_file = self._paths.evidence_dir / f"{prefix}.stdout.txt"
-        stderr_file = self._paths.evidence_dir / f"{prefix}.stderr.txt"
-        record_file = self._paths.evidence_dir / f"{prefix}.json"
+        stdout_file, stderr_file, record_file = self._evidence_files(
+            command, round_index, index
+        )
 
         started_at = utc_now_iso()
         monotonic_start = time.monotonic()
@@ -221,12 +304,7 @@ class ValidationEngine:
             stderr_bytes=len(stderr_text.encode("utf-8")),
             launch_error=launch_error,
         )
-
-        record_file.write_text(
-            json.dumps(evidence.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
-            + "\n",
-            encoding="utf-8",
-        )
+        self._persist(evidence, record_file)
         return evidence
 
 

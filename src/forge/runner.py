@@ -143,6 +143,19 @@ class TaskRunner:
     # ------------------------------------------------------------------
 
     def _remaining_seconds(self) -> float:
+        """Seconds left in the task budget, from a monotonic deadline.
+
+        This is handed to the validation engine as a callback so it can be
+        re-read before every command.
+
+        LIMITATION (v0.1): ``task_timeout_seconds`` bounds validation
+        subprocesses and is checked between attempts. It is NOT a hard
+        wall-clock limit around provider execution. The provider runs in this
+        process via a plain call to ``implement()``, so a provider that hangs
+        cannot be forcibly interrupted - the deadline is only observed once
+        control returns. Enforcing that requires running providers in a separate
+        process or thread with a kill path, which is deferred to a later phase.
+        """
         if self._deadline is None:
             return float(self.task.limits.task_timeout_seconds)
         return self._deadline - time.monotonic()
@@ -156,7 +169,10 @@ class TaskRunner:
             previous_state=self.machine.state,
             new_state=self.machine.state,
             message="Task timeout exceeded.",
-            metadata={"task_timeout_seconds": self.task.limits.task_timeout_seconds},
+            metadata={
+                "guard": "task_timeout",
+                "task_timeout_seconds": self.task.limits.task_timeout_seconds,
+            },
         )
         self.machine.transition(
             State.FAILED,
@@ -368,11 +384,14 @@ class TaskRunner:
         return result
 
     def _validate(self) -> ValidationResult:
+        # Pass the callback itself, not its current value: the engine
+        # re-evaluates it before each command so the whole round shares one
+        # budget instead of granting it to every command in turn.
         result = self._engine.run(
             commands=self.task.validation_commands,
             round_index=self.fix_rounds_used,
             cwd=self.paths.workspace_dir,
-            remaining_seconds=self._remaining_seconds(),
+            task_time_remaining=self._remaining_seconds,
         )
         self.audit.append(
             event_type=EventType.VALIDATION_RESULT,

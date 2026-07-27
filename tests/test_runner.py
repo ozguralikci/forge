@@ -7,6 +7,7 @@ verdict is asserting that a real process exited zero.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -278,23 +279,72 @@ def test_audit_log_brackets_the_run(
 def test_task_timeout_fails_the_run(
     runs_dir: Path, task_dict: Callable[..., dict[str, Any]]
 ) -> None:
-    """An exhausted task timeout ends the run in FAILED."""
+    """An exhausted task timeout ends the run in FAILED, not BLOCKED.
+
+    max_fix_rounds is set high so the run cannot end in BLOCKED first: the only
+    way out is the task-timeout guard.
+    """
     task = parse_task(
         task_dict(
             validation={
-                "commands": [["${PYTHON}", "-c", "import time; time.sleep(5)"]]
+                "commands": [["${PYTHON}", "-c", "import time; time.sleep(30)"]]
             },
             execution={
-                "max_fix_rounds": 1,
-                "command_timeout_seconds": 1,
+                "max_fix_rounds": 10,
+                "command_timeout_seconds": 30,
                 "task_timeout_seconds": 1,
             },
         )
     )
     outcome = run_task(task, runs_dir=runs_dir, run_id="run-timeout")
 
-    assert outcome.final_state in {State.FAILED, State.BLOCKED}
+    assert outcome.final_state is State.FAILED
     assert outcome.verdict == "FAIL"
+
+    events = read_events(outcome.paths.events_file)
+    guards = [
+        event["metadata"].get("guard")
+        for event in events
+        if event["event_type"] == "GUARD_TRIGGERED"
+    ]
+    assert "task_timeout" in guards
+    assert "max_fix_rounds" not in guards
+
+
+def test_multiple_commands_cannot_exceed_the_task_budget(
+    runs_dir: Path, task_dict: Callable[..., dict[str, Any]]
+) -> None:
+    """Cumulative validation time is bounded by task_timeout_seconds.
+
+    Four commands sleep 0.5s each with a generous per-command timeout, under a
+    1 second task budget. If each command were granted the full remaining
+    budget, all four would pass and validation would take ~2s. The shared budget
+    must stop the round and fail the run instead.
+    """
+    sleeper = ["${PYTHON}", "-c", "import time; time.sleep(0.5)"]
+    task = parse_task(
+        task_dict(
+            validation={"commands": [sleeper, sleeper, sleeper, sleeper]},
+            execution={
+                "max_fix_rounds": 0,
+                "command_timeout_seconds": 30,
+                "task_timeout_seconds": 1,
+            },
+        )
+    )
+
+    started = time.monotonic()
+    outcome = run_task(task, runs_dir=runs_dir, run_id="run-cumulative")
+    elapsed = time.monotonic() - started
+
+    assert not outcome.passed
+    assert outcome.verdict == "FAIL"
+    assert outcome.last_validation is not None
+    assert not outcome.last_validation.passed
+    # The round stopped early rather than running all four commands.
+    assert len(outcome.last_validation.commands) < 4
+    # Comfortably under the ~2s the unshared-budget behaviour would take.
+    assert elapsed < 1.8, f"validation overran the task budget ({elapsed:.2f}s)"
 
 
 def test_runner_uses_a_fresh_workspace_per_run(

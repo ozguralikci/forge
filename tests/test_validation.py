@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 from forge.audit import RunPaths
@@ -151,6 +152,79 @@ def test_commands_run_inside_the_workspace(runs_dir: Path) -> None:
     result = engine.run([command], round_index=0)
 
     assert result.passed
+
+
+def test_command_is_not_launched_when_the_budget_is_gone(runs_dir: Path) -> None:
+    """With no task time left, the command is recorded as timed out, unlaunched."""
+    engine, paths = build_engine(runs_dir)
+    marker = paths.workspace_dir / "launched.txt"
+    command = [
+        sys.executable,
+        "-c",
+        "import pathlib; pathlib.Path('launched.txt').write_text('ran')",
+    ]
+
+    result = engine.run(
+        [command], round_index=0, task_time_remaining=lambda: 0.0
+    )
+
+    assert not result.passed
+    evidence = result.commands[0]
+    assert evidence.timed_out is True
+    assert evidence.exit_code is None
+    assert evidence.duration_seconds == 0.0
+    assert evidence.launch_error is not None
+    assert "not launched" in evidence.launch_error
+
+    # The proof that it never ran: the command's side effect is absent.
+    assert not marker.exists()
+
+    # Evidence artifacts are still written, in the usual shape.
+    assert (paths.root / evidence.stdout_path).is_file()
+    assert (paths.root / evidence.stderr_path).is_file()
+    assert len(list(paths.evidence_dir.glob("*.json"))) == 1
+
+
+def test_budget_is_shared_across_commands_in_a_round(runs_dir: Path) -> None:
+    """The whole round shares one budget; commands cannot each consume it.
+
+    Three commands sleep 0.6s each under a 1.0s task budget and a much larger
+    per-command timeout. If the remaining budget were recomputed only once, all
+    three would be granted ~1.0s, all would pass, and the round would run for
+    ~1.8s - overrunning the deadline. Sharing the budget stops it early.
+    """
+    engine, _ = build_engine(runs_dir, timeout=30)
+    deadline = time.monotonic() + 1.0
+    sleeper = [sys.executable, "-c", "import time; time.sleep(0.6)"]
+
+    started = time.monotonic()
+    result = engine.run(
+        [sleeper, sleeper, sleeper],
+        round_index=0,
+        task_time_remaining=lambda: deadline - time.monotonic(),
+    )
+    elapsed = time.monotonic() - started
+
+    assert not result.passed, "the round must not pass by overrunning the budget"
+    assert len(result.commands) < 3, "the round must stop before running every command"
+    assert result.commands[-1].timed_out is True
+    # Generous bound: the unfixed behaviour takes ~1.8s+, the fixed one ~1.0s.
+    assert elapsed < 1.6, f"round overran the shared budget ({elapsed:.2f}s)"
+
+
+def test_per_command_timeout_still_applies_under_a_large_budget(
+    runs_dir: Path,
+) -> None:
+    """The command timeout is the binding limit when task time is plentiful."""
+    engine, _ = build_engine(runs_dir, timeout=1)
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+    result = engine.run(
+        [command], round_index=0, task_time_remaining=lambda: 3600.0
+    )
+
+    assert not result.passed
+    assert result.commands[0].timed_out is True
 
 
 def test_rounds_write_separate_evidence_files(runs_dir: Path) -> None:

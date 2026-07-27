@@ -1,0 +1,33 @@
+platform:
+  name: AI Software Factory
+  version: 0.1.0
+
+execution:
+  max_discussion_rounds: 2
+  max_fix_rounds: 3
+  max_task_minutes: 30
+  network_default: deny
+  production_deployment_default: deny
+
+quality:
+  tests_required: true
+  lint_required: true
+  type_check_required: true
+  critical_security_findings_allowed: 0
+  protected_test_changes_allowed: false
+
+budget:
+  default_project_limit_try: null
+  approval_required_for_paid_services: true
+
+providers:
+  planner: openai
+  architect: anthropic
+  implementer: claude_code
+  reviewer: codex_cli
+
+protected_paths:
+  - constitution/
+  - acceptance_tests/
+  - orchestrator/security/
+  - orchestrator/budget/

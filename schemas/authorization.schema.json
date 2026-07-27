@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Authorization",
+  "type": "object",
+  "required": ["authorization_id", "project_id", "action", "scope", "status"],
+  "properties": {
+    "authorization_id": {"type": "string"},
+    "project_id": {"type": "string"},
+    "action": {"type": "string"},
+    "scope": {"type": "object"},
+    "status": {"enum": ["requested", "approved_once", "approved", "rejected", "expired", "revoked"]},
+    "spending_limit_try": {"type": ["number", "null"]},
+    "expires_at": {"type": ["string", "null"]},
+    "user_declaration": {"type": ["string", "null"]},
+    "risk_notes": {"type": "array", "items": {"type": "string"}}
+  }
+}

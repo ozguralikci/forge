@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Decision",
+  "type": "object",
+  "required": ["decision_id", "project_id", "status", "decision", "reasons"],
+  "properties": {
+    "decision_id": {"type": "string"},
+    "project_id": {"type": "string"},
+    "task_id": {"type": ["string", "null"]},
+    "status": {"enum": ["approved", "changes_requested", "rejected", "blocked"]},
+    "decision": {"type": "string"},
+    "reasons": {"type": "array", "items": {"type": "string"}},
+    "rejected_alternatives": {"type": "array"},
+    "required_actions": {"type": "array", "items": {"type": "string"}},
+    "user_approval_required": {"type": "boolean"}
+  }
+}
